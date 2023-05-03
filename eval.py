@@ -1,83 +1,79 @@
-import argparse
-from typing import Union
-
-from pathlib import Path
+from ins.Fixed_Inputs_81 import OUT_TRIP_RECORD_COLS, IN_TRIP_RECORD_COLS, PAX_RECORD_COLS
 from sb3_contrib.ppo_mask import MaskablePPO
-
-import gym
-from gym import spaces
+from run import BusEnv
 import numpy as np
+import os
+import pandas as pd
 
-class TestEnv(gym.Env):
-    """Custom Environment that follows gym interface"""
+def write_trip_records(save_folder, out_record_set, in_record_set, pax_record_set):
+    os.mkdir(save_folder)
+    path_out_trip_record = save_folder + '/trip_record_ob.pkl'
+    path_in_trip_record = save_folder + '/trip_record_ib.pkl'
+    path_pax_record = save_folder + '/pax_record_ob.pkl'
 
-    def __init__(self, config=None, cancelled_blocks=None):
+    out_trip_record = pd.concat(out_record_set, ignore_index=True)
+    in_trip_record = pd.concat(in_record_set, ignore_index=True)
+    pax_record = pd.concat(pax_record_set, ignore_index=True)
 
-        # define action & observation space
-        self.action_space = spaces.Discrete(8)
-        self.observation_space = spaces.Box(low=-1e3, high=1e3, shape=(9,), dtype=np.float32)
-        self.invalid_actions = []
-        self.possible_actions = list(range(self.action_space.n))
+    out_trip_record.to_pickle(path_out_trip_record)
+    in_trip_record.to_pickle(path_in_trip_record)
+    pax_record.to_pickle(path_pax_record)
+    return
 
+def process_trip_record(record, record_col_names, rep_nr):
+    df = pd.DataFrame(record, columns=record_col_names)
+    df['replication'] = pd.Series([rep_nr + 1 for _ in range(len(df.index))])
+    return df
 
-    def step(self, action):
-        obs = self.observation_space.sample()
-        reward = 0
-        done = False
-        info = {}
-        return obs, reward, done, info
+def run_rl_scenario(episodes=1, cancelled_blocks=None, save_results=False, save_folder=None, messages=False, obs=None):
+    config = {"HOLD_INTERVALS": 60,
+              "IMPOSED_DELAY_LIMIT": 240}
+    env = BusEnv(config, cancelled_blocks=cancelled_blocks)
+    env.reset()
 
-    def reset(self):
-        return self.observation_space.sample()  # reward, done, info can't be included
-
-    def render(self, mode='human'):
-        pass
-
-    def close(self):
-        pass
-
-    def action_masks(self):
-        return [action not in self.invalid_actions for action in self.possible_actions]
-
-
-def load_model(model_name: str,
-               env: gym.Env,
-               path: Path = Path("models/")
-               ) -> MaskablePPO:
-    model_path = Path(path) / model_name
+    model_path = "models/PPO_5am6pm/100000.zip"
     model = MaskablePPO.load(model_path, env=env)
-    return model
 
+    if obs:
+        obs = np.array(obs, dtype=np.float32)
+        action, _ = model.predict(obs)
+        return action
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument("model_name", type=str)
-    parser.add_argument("--path", type=str, default="models/")
-    args = parser.parse_args()
-
-    env = TestEnv()
-    model = load_model(args.model_name, env, args.path)
-    
-    episodes = 10
+    # episodes = 1
+    all_rewards = []
     reward_list = []
-    cnt = 0
+
+    out_trip_record_set = []
+    in_trip_record_set = []
+    pax_record_set = []
+
     for ep in range(episodes):
         obs = env.reset()
         done = False
         cnt = 0
         rewards = []
         while not done:
-            cnt += 1
-            if cnt > 1000:
-                break
             action, _ = model.predict(obs)
-            print("Observation: ", obs)
+            if messages:
+                print("Observation: ", obs)
             obs, reward, done, info = env.step(action)
-            print("Action: ", action)
-            print("Reward: ", reward)
-            print("Next observation: ", obs)
-            print()
+            if messages:
+                print("Action: ", action)
+                print("Reward: ", reward)
+                print("Next observation: ", obs)
+                print()
             cnt += 1
             rewards.append(reward)
         reward_list.append(rewards)
+        all_rewards.append(np.mean(reward_list))
+        if save_results:
+            # record simulation results
+            out_trip_record_set.append(process_trip_record(env.env.out_trip_record, OUT_TRIP_RECORD_COLS, ep))
+            in_trip_record_set.append(process_trip_record(env.env.in_trip_record, IN_TRIP_RECORD_COLS, ep))
+            pax_record_set.append(process_trip_record(env.env.completed_pax_record, PAX_RECORD_COLS, ep))
+    if save_results:
+        write_trip_records(save_folder, out_trip_record_set, in_trip_record_set, pax_record_set)
     env.close()
+    # print("Average reward: ", np.mean(reward_list))
+
+# print(run_rl_scenario(obs=[5*60, 5*60, 5*60, 5*60, 5*60, 5*60, 5*60, 5*60, 0*60]))
